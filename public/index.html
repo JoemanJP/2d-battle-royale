@@ -1,1 +1,195 @@
-<PASTE_HTML_CONTENT_HERE>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>2D Battle Royale - Multiplayer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    canvas { display: block; background: #222; margin: 0 auto; }
+    #ui {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+      color: white;
+      font-family: Arial;
+    }
+    #usernameInput {
+      font-size: 16px;
+      padding: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <input id="usernameInput" type="text" placeholder="Enter your name" />
+    <div id="chat"></div>
+  </div>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const usernameInput = document.getElementById('usernameInput');
+
+    let playerId = null;
+    let players = {};
+    let bullets = [];
+    let lootItems = []; // 💰 物資清單
+    let chatMessages = [];
+    const zone = { x: 100, y: 75, width: 600, height: 450, shrinkRate: 0.5 };
+    const player = { x: 400, y: 300, radius: 15, speed: 3, color: 'lime', hp: 100, name: '', weapon: 'Pistol' };
+
+    const ws = new WebSocket('ws://localhost:3000');
+
+    ws.onmessage = msg => {
+      const data = JSON.parse(msg.data);
+      if (data.id) {
+        playerId = data.id;
+      } else if (data.type === 'players') {
+        players = data.players;
+      } else if (data.type === 'bullets') {
+        bullets = data.bullets;
+      } else if (data.type === 'chat') {
+        chatMessages.push(data.message);
+        if (chatMessages.length > 5) chatMessages.shift();
+        renderChat();
+      } else if (data.type === 'loot') {
+        lootItems = data.loot;
+      }
+    };
+
+    function renderChat() {
+      const chatDiv = document.getElementById('chat');
+      chatDiv.innerHTML = chatMessages.map(m => `<div>${m}</div>`).join('');
+    }
+
+    const keys = {};
+    document.addEventListener('keydown', e => {
+      keys[e.key] = true;
+      if (e.key === 'Enter') {
+        const name = usernameInput.value.trim();
+        if (name) {
+          player.name = name;
+          ws.send(JSON.stringify({ type: 'name', name }));
+          usernameInput.style.display = 'none';
+        }
+      }
+    });
+    document.addEventListener('keyup', e => keys[e.key] = false);
+    document.addEventListener('click', shoot);
+
+    function shoot(e) {
+      if (!playerId || !player.name) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const angle = Math.atan2(my - player.y, mx - player.x);
+      const speed = player.weapon === 'Sniper' ? 10 : 6;
+      const bullet = {
+        owner: playerId,
+        x: player.x,
+        y: player.y,
+        dx: Math.cos(angle) * speed,
+        dy: Math.sin(angle) * speed
+      };
+      ws.send(JSON.stringify({ type: 'shoot', bullet }));
+    }
+
+    function update() {
+      if (keys['w']) player.y -= player.speed;
+      if (keys['s']) player.y += player.speed;
+      if (keys['a']) player.x -= player.speed;
+      if (keys['d']) player.x += player.speed;
+
+      // 撿取物資
+      lootItems = lootItems.filter(item => {
+        const dist = Math.hypot(player.x - item.x, player.y - item.y);
+        if (dist < 20) {
+          player.weapon = item.name;
+          return false; // 撿起後移除
+        }
+        return true;
+      });
+
+      // 縮圈與毒圈扣血
+      zone.x += zone.shrinkRate;
+      zone.y += zone.shrinkRate;
+      zone.width -= zone.shrinkRate * 2;
+      zone.height -= zone.shrinkRate * 2;
+
+      if (
+        player.x < zone.x || player.x > zone.x + zone.width ||
+        player.y < zone.y || player.y > zone.y + zone.height
+      ) {
+        player.hp -= 0.5;
+      }
+
+      if (ws.readyState === WebSocket.OPEN && playerId && player.name) {
+        ws.send(JSON.stringify({
+          type: 'update',
+          position: { x: player.x, y: player.y },
+          hp: player.hp,
+          name: player.name,
+          weapon: player.weapon
+        }));
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = 'white';
+      ctx.strokeRect(zone.x, zone.y, zone.width, zone.height);
+
+      // 子彈
+      ctx.fillStyle = 'yellow';
+      bullets.forEach(b => {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      // 物資
+      lootItems.forEach(item => {
+        ctx.fillStyle = 'orange';
+        ctx.fillRect(item.x - 5, item.y - 5, 10, 10);
+        ctx.fillStyle = 'white';
+        ctx.fillText(item.name, item.x - 15, item.y - 10);
+      });
+
+      // 玩家
+      for (const id in players) {
+        const p = players[id];
+        ctx.fillStyle = id === String(playerId) ? 'lime' : 'cyan';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 15, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'white';
+        ctx.fillText(`${p.name || id} HP:${Math.floor(p.hp)} ${p.weapon || ''}`, p.x - 40, p.y - 25);
+      }
+
+      // 勝利顯示
+      const alive = Object.values(players).filter(p => p.hp > 0);
+      if (alive.length === 1 && player.hp > 0) {
+        ctx.fillStyle = 'gold';
+        ctx.font = '30px Arial';
+        ctx.fillText('🎉 WINNER WINNER CHICKEN DINNER!', 150, 300);
+      }
+    }
+
+    function gameLoop() {
+      update();
+      draw();
+      if (player.hp > 0) requestAnimationFrame(gameLoop);
+      else {
+        ctx.fillStyle = 'red';
+        ctx.font = '30px Arial';
+        ctx.fillText('💀 YOU DIED', 320, 300);
+      }
+    }
+
+    gameLoop();
+  </script>
+</body>
+</html>
